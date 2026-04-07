@@ -45,11 +45,14 @@ training:
   weight_decay: 0.0001
   lr: 0.05
   lr_scheduler: "cosine"
-  warmup_epochs: 10
+  warmup_epochs: 10                # linear warmup epochs prepended to scheduler
   batch_size: 128
   epochs: 200
   num_workers: 16
   pin_memory: true
+  use_amp: true                    # torch.cuda.amp mixed-precision training
+  clip_grad_norm: 1.0              # 0 disables gradient clipping
+  seed: 42                         # rank-offset seed for python/numpy/torch
 
 data:
   root_dir: "/mnt/hdd1/data/celebvhq_scene_v2ce/h5"

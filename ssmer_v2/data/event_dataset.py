@@ -227,8 +227,17 @@ class TripleEventDatasetV2(Dataset):
     # ------------------------------------------------------------------
 
     def _cache_paths(self, video_id: str) -> tuple[str, str, str]:
+        # The voxel filename embeds t_bins so that changing model.t_bins
+        # automatically invalidates stale (T_old, H, W) caches instead of
+        # silently loading them and feeding wrong-shape arrays into the
+        # stem_voxel conv (which would crash with a cryptic shape error,
+        # or worse, silently mismatch if the stem was rebuilt for the new T).
         base = os.path.join(self.cache_dir, video_id)
-        return f"{base}_frame.npy", f"{base}_voxel.npy", f"{base}_ts.npy"
+        return (
+            f"{base}_frame.npy",
+            f"{base}_voxel_t{self.t_bins}.npy",
+            f"{base}_ts.npy",
+        )
 
     def _cache_exists(self, video_id: str) -> bool:
         return all(os.path.isfile(p) for p in self._cache_paths(video_id))
