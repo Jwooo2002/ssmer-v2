@@ -1,0 +1,11 @@
+# A1: Original SSMER baseline — SimSiam contrastive only, no reconstruction.
+# Must reproduce v1 trio_train_jsd behaviour exactly.
+model:
+  use_recon: false
+  use_contrastive: true
+  use_shared_private: false
+
+loss:
+  use_reconstruction: false
+  use_contrastive: true
+  use_shared_private: false

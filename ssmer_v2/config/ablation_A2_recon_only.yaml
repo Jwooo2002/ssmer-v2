@@ -1,0 +1,10 @@
+# A2: Reconstruction only — no contrastive loss.
+model:
+  use_recon: true
+  use_contrastive: false
+  use_shared_private: false
+
+loss:
+  use_reconstruction: true
+  use_contrastive: false
+  use_shared_private: false

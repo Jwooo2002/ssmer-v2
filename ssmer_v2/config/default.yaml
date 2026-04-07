@@ -1,0 +1,67 @@
+model:
+  encoder: "hrnet"
+  hrnet_config: "v1_default"       # uses models/hrnet/config/default.py
+  embed_dim: 256                   # target token dimension
+  t_bins: 5                        # voxel temporal bins → stem_voxel in_channels
+  encoder_layers: 4                # Transformer encoder depth
+  decoder_layers: 2                # Transformer decoder depth
+  nhead: 8
+  ffn_dim: 1024
+  dropout: 0.1
+  use_recon: true
+  use_contrastive: true
+  use_shared_private: false
+  voxel_temporal_encoding: true    # learnable (1,T,1,1) bias added before stem_voxel
+
+  shared_private:
+    shared_dim: 128
+    private_dim: 128
+
+representation:
+  types: ["frame", "voxel", "timesurface"]
+  # stem in_channels per representation
+  frame_channels: 1
+  voxel_channels: 5                # must equal model.t_bins
+  timesurface_channels: 1
+
+masking:
+  strategy: "random"               # "random" | "sequential" | "fixed"
+  fixed_target: null               # only used when strategy="fixed"
+  dual_masking_ratio: 0.0          # patch-level masking within visible tokens
+
+loss:
+  use_reconstruction: true
+  use_contrastive: true
+  lambda_contrastive: 0.5          # L = L_recon + lambda * L_contrastive
+  recon_type: "smooth_l1"          # "smooth_l1" | "mse"
+  normalize_recon_features: false
+  use_shared_private: false
+  lambda_orth: 0.1
+  lambda_recon_sp: 0.1
+
+training:
+  optimizer: "sgd"
+  momentum: 0.9
+  weight_decay: 0.0001
+  lr: 0.05
+  lr_scheduler: "cosine"
+  warmup_epochs: 10
+  batch_size: 128
+  epochs: 200
+  num_workers: 16
+  pin_memory: true
+
+data:
+  root_dir: "/mnt/hdd1/data/celebvhq_scene_v2ce/h5"
+  split_path: "data/train_val_test_split_multilabel.json"
+  input_size: 224
+  sensor_h: 512
+  sensor_w: 512
+
+checkpoint:
+  save_dir: "/media/jiwoong/HDD/data/ssmer_v2"
+  save_freq: 10                    # save every N epochs
+  resume: null                     # path to checkpoint to resume from
+
+logging:
+  print_freq: 50                   # log every N steps

@@ -1,0 +1,11 @@
+# A4: Combined loss, lambda=0.5
+model:
+  use_recon: true
+  use_contrastive: true
+  use_shared_private: false
+
+loss:
+  use_reconstruction: true
+  use_contrastive: true
+  lambda_contrastive: 0.5
+  use_shared_private: false

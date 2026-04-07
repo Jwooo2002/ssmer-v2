@@ -1,0 +1,15 @@
+# A7: Best lambda + additional patch-level masking within visible tokens.
+# Placeholder: lambda_contrastive set to 0.5 until best lambda is confirmed.
+model:
+  use_recon: true
+  use_contrastive: true
+  use_shared_private: false
+
+masking:
+  dual_masking_ratio: 0.3          # randomly zero out 30% of visible tokens
+
+loss:
+  use_reconstruction: true
+  use_contrastive: true
+  lambda_contrastive: 0.5          # UPDATE to best lambda from A3-A5
+  use_shared_private: false
