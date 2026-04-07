@@ -35,9 +35,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -124,17 +126,49 @@ def build_optimizer(model: nn.Module, cfg) -> torch.optim.Optimizer:
     raise ValueError(f"Unknown optimizer: {t.optimizer!r}")
 
 
-def build_scheduler(optimizer: torch.optim.Optimizer, cfg) -> torch.optim.lr_scheduler._LRScheduler:
+def build_scheduler(optimizer: torch.optim.Optimizer, cfg):
+    """
+    Build the LR scheduler.  If cfg.training.warmup_epochs > 0, the requested
+    main scheduler (cosine / step) is wrapped in a SequentialLR with a leading
+    LinearLR warmup phase.  scheduler.step() is called once per epoch.
+    """
     t = cfg.training
+    warmup_epochs = int(t.get("warmup_epochs", 0) or 0)
+    main_epochs = max(1, t.epochs - warmup_epochs)
+
     if t.lr_scheduler == "cosine":
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=t.epochs, eta_min=0.0
+        main = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=main_epochs, eta_min=0.0
         )
-    if t.lr_scheduler == "step":
-        return torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=t.epochs // 3, gamma=0.1
+    elif t.lr_scheduler == "step":
+        main = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=max(1, main_epochs // 3), gamma=0.1
         )
-    raise ValueError(f"Unknown lr_scheduler: {t.lr_scheduler!r}")
+    else:
+        raise ValueError(f"Unknown lr_scheduler: {t.lr_scheduler!r}")
+
+    if warmup_epochs <= 0:
+        return main
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1e-3,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, main],
+        milestones=[warmup_epochs],
+    )
+
+
+def _atomic_torch_save(obj: object, path: Path) -> None:
+    """torch.save via tmp file + os.replace so a killed job never leaves a
+    half-written .pth that crashes the next --resume."""
+    tmp = Path(str(path) + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
 def save_checkpoint(
@@ -145,13 +179,13 @@ def save_checkpoint(
 ) -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = save_dir / f"checkpoint_{epoch:04d}.pth"
-    torch.save(state, ckpt_path)
+    _atomic_torch_save(state, ckpt_path)
 
     # Backbone-only checkpoint for Stage 2
     backbone_path = save_dir / f"backbone_{epoch:04d}.pth"
     # Unwrap DDP if needed
     raw_model = model.module if isinstance(model, DDP) else model
-    torch.save(raw_model.backbone_state_dict(), backbone_path)
+    _atomic_torch_save(raw_model.backbone_state_dict(), backbone_path)
 
     logging.info(f"Saved checkpoint  → {ckpt_path}")
     logging.info(f"Saved backbone    → {backbone_path}")
@@ -170,9 +204,13 @@ def train_one_epoch(
     cfg,
     gpu: int | None,
     is_main: bool,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> dict[str, float]:
     model.train()
     meters: dict[str, AverageMeter] = {}
+
+    use_amp = scaler is not None
+    clip_grad = float(cfg.training.get("clip_grad_norm", 0.0) or 0.0)
 
     for step, (frame, voxel, timesurface) in enumerate(loader):
         if gpu is not None:
@@ -180,12 +218,25 @@ def train_one_epoch(
             voxel       = voxel.cuda(gpu, non_blocking=True)
             timesurface = timesurface.cuda(gpu, non_blocking=True)
 
-        output = model(frame, voxel, timesurface)
-        total_loss, log_dict = criterion(output)
+        optimizer.zero_grad(set_to_none=True)
 
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                output = model(frame, voxel, timesurface)
+                total_loss, log_dict = criterion(output)
+            scaler.scale(total_loss).backward()
+            if clip_grad > 0.0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            output = model(frame, voxel, timesurface)
+            total_loss, log_dict = criterion(output)
+            total_loss.backward()
+            if clip_grad > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            optimizer.step()
 
         # Update meters
         bs = frame.size(0)
@@ -207,16 +258,35 @@ def train_one_epoch(
 # Main worker
 # ---------------------------------------------------------------------------
 
+def _set_seed(seed: int, rank: int = 0) -> None:
+    """Seed python / numpy / torch with rank-offset for distributed runs."""
+    s = int(seed) + int(rank)
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(s)
+
+
 def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
-    is_distributed = cfg.training.get("world_size", 1) > 1
-    is_main = (not is_distributed) or (dist.get_rank() == 0)
+    # --- Distributed detection ---
+    # Source of truth: torch.distributed itself, not cfg (cfg never carries
+    # world_size, and reading it from cfg always evaluated to False, silently
+    # disabling DDP / DistributedSampler under torchrun).
+    is_distributed = dist.is_available() and dist.is_initialized()
+    rank = dist.get_rank() if is_distributed else 0
+    is_main = rank == 0
 
     # --- Logging ---
-    if is_main:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s  %(message)s",
-        )
+    # Configure on every rank — main at INFO, others at WARNING — so non-main
+    # ranks still surface real errors instead of silently swallowing them.
+    logging.basicConfig(
+        level=logging.INFO if is_main else logging.WARNING,
+        format=f"%(asctime)s %(levelname)s [rank{rank}]  %(message)s",
+    )
+
+    # --- Seed ---
+    _set_seed(cfg.training.get("seed", 42), rank=rank)
 
     # --- Model ---
     pretrained = cfg.checkpoint.get("pretrained_hrnet", None)
@@ -251,6 +321,12 @@ def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
     optimizer  = build_optimizer(model, cfg)
     scheduler  = build_scheduler(optimizer, cfg)
 
+    # --- AMP ---
+    use_amp = bool(cfg.training.get("use_amp", False)) and torch.cuda.is_available()
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if is_main:
+        logging.info(f"AMP enabled: {use_amp}")
+
     # --- Resume ---
     start_epoch = 1
     resume_path = cfg.checkpoint.get("resume", None)
@@ -264,6 +340,20 @@ def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
         raw_model.load_state_dict(ckpt["state_dict"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
+        if scaler is not None and ckpt.get("scaler") is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        # Restore RNG state so resumed runs are bit-identical to non-resumed.
+        rng = ckpt.get("rng")
+        if rng is not None:
+            torch.set_rng_state(rng["torch"])
+            if rng.get("torch_cuda") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            random.setstate(rng["python"])
+            np.random.set_state(rng["numpy"])
+        # Restore sequential masking counter (only matters for sequential strategy)
+        seq_counter = ckpt.get("sequential_counter")
+        if seq_counter is not None:
+            raw_model._sequential_counter = int(seq_counter)
         start_epoch = ckpt["epoch"] + 1
         if is_main:
             logging.info(f"Resumed from epoch {ckpt['epoch']}  ({resume_path})")
@@ -277,7 +367,7 @@ def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
 
         log = train_one_epoch(
             train_loader, model, criterion, optimizer,
-            epoch, cfg, gpu, is_main,
+            epoch, cfg, gpu, is_main, scaler=scaler,
         )
         scheduler.step()
 
@@ -295,6 +385,17 @@ def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
                     "state_dict":  raw_model.state_dict(),
                     "optimizer":   optimizer.state_dict(),
                     "scheduler":   scheduler.state_dict(),
+                    "scaler":      scaler.state_dict() if scaler is not None else None,
+                    "rng": {
+                        "torch":      torch.get_rng_state(),
+                        "torch_cuda": (
+                            torch.cuda.get_rng_state_all()
+                            if torch.cuda.is_available() else None
+                        ),
+                        "python":     random.getstate(),
+                        "numpy":      np.random.get_state(),
+                    },
+                    "sequential_counter": raw_model._sequential_counter,
                     "config":      OmegaConf.to_container(cfg, resolve=True),
                 },
                 save_dir=save_dir,

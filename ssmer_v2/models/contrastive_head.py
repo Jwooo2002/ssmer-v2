@@ -48,8 +48,9 @@ class ContrastiveHead(nn.Module):
             nn.Linear(embed_dim, proj_dim, bias=False),
             nn.BatchNorm1d(proj_dim, affine=False),
         )
-        # Disable bias on the last linear (followed by BN), matching v1 hack.
-        self.projector[-2].bias = None   # type: ignore[assignment]
+        # Note: the last Linear is bias=False already; v1's "bias=None" hack
+        # was a no-op against a Linear that had its bias kwarg set, so it has
+        # been removed.
 
         # 2-layer predictor — mirrors HRNetSimSiam.predictor in v1.
         self.predictor = nn.Sequential(
