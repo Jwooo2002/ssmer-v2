@@ -34,6 +34,7 @@ import os
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from omegaconf import DictConfig
 
@@ -200,6 +201,8 @@ class TripleEventDatasetV2(Dataset):
         self.t_bins      = cfg.model.t_bins
         self.sensor_size = (self.sensor_h, self.sensor_w, 2)
 
+        self.input_size = data_cfg.input_size   # resize target (e.g. 224)
+
         self.use_cache  = data_cfg.use_cache
         self.cache_dir  = os.path.join(data_cfg.cache_dir, split)
         if self.use_cache:
@@ -289,8 +292,19 @@ class TripleEventDatasetV2(Dataset):
             if self.use_cache:
                 self._save_cache(video_id, frame_norm, voxel_norm, ts_norm)
 
-        return (
-            torch.from_numpy(frame_norm),
-            torch.from_numpy(voxel_norm),
-            torch.from_numpy(ts_norm),
-        )
+        frame_t = torch.from_numpy(frame_norm)
+        voxel_t = torch.from_numpy(voxel_norm)
+        ts_t    = torch.from_numpy(ts_norm)
+
+        # Resize all representations to (input_size, input_size) so that
+        # the HRNet stem produces feature maps of known size
+        # (input_size/4)^2, matching the pos_embed and n_tokens set at
+        # model construction time.
+        # Without this, sensor_h=512 → N=16384 tokens but pos_embed only
+        # has max_tokens=3136 → broadcast crash on first batch.
+        s = self.input_size
+        frame_t = F.interpolate(frame_t.unsqueeze(0), size=(s, s), mode="bilinear", align_corners=False).squeeze(0)
+        voxel_t = F.interpolate(voxel_t.unsqueeze(0), size=(s, s), mode="bilinear", align_corners=False).squeeze(0)
+        ts_t    = F.interpolate(ts_t.unsqueeze(0),    size=(s, s), mode="bilinear", align_corners=False).squeeze(0)
+
+        return frame_t, voxel_t, ts_t

@@ -4,10 +4,13 @@ ContrastiveHead: SimSiam projector + predictor adapted for token sequences.
 Ported from simsiam/builder.py:HRNetSimSiam.  The key difference from v1 is
 that the input is a token sequence (B, N, D) rather than a 1D vector (B, D).
 Global average pooling over N collapses the sequence to a single vector before
-the MLP, which:
-  1. Preserves exact v1 loss semantics (same BN + MLP structure).
-  2. Makes ablation A1 (use_recon=False, use_contrastive=True) reproduce the
-     v1 SimSiam result on the same data.
+the MLP.
+
+Ablation A1 (use_recon=False) uses this head with no masking and no encoder —
+the trio of raw projected tokens goes directly here, matching the symmetric
+three-pair structure of v1 trio_train_jsd.  This is v1-flavoured, not
+numerically identical: embed_dim=256 vs v1's 2048, and the projector input
+is a spatially-averaged token rather than a pooled conv feature.
 
 Spec reference: §2.1 step 9 (contrastive path); §7 A1 baseline note.
 """

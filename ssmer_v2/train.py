@@ -254,7 +254,11 @@ def main_worker(gpu: int | None, cfg, args: argparse.Namespace) -> None:
     # --- Resume ---
     start_epoch = 1
     resume_path = cfg.checkpoint.get("resume", None)
-    if resume_path and os.path.isfile(resume_path):
+    if resume_path:
+        if not os.path.isfile(resume_path):
+            raise FileNotFoundError(
+                f"checkpoint.resume is set but file does not exist: {resume_path}"
+            )
         ckpt = torch.load(resume_path, map_location="cpu")
         raw_model = model.module if isinstance(model, DDP) else model
         raw_model.load_state_dict(ckpt["state_dict"])

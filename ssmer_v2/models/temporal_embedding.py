@@ -19,7 +19,6 @@ class TemporalEmbedding(nn.Module):
         self.t_bins = t_bins
         self.bias = nn.Parameter(torch.zeros(1, t_bins, 1, 1))
 
-    @torch.no_grad()
     def extra_repr(self) -> str:
         return f"t_bins={self.t_bins}"
 

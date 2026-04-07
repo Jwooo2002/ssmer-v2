@@ -253,6 +253,31 @@ class SSMERv2(nn.Module):
         # each: (B, N, D)
 
         # ----------------------------------------------------------------
+        # A1 short-circuit: contrastive-only path (no masking, no encoder,
+        # no decoder).  All three representations are treated symmetrically,
+        # matching the trio structure of v1 trio_train_jsd.
+        # NOTE: this is v1-flavoured, not numerically identical to v1 —
+        # embed_dim=256 vs v1's 2048, and the projector input is a spatially
+        # averaged token rather than a pooled conv feature.
+        # ----------------------------------------------------------------
+        if not self.use_recon:
+            contrastive_outputs = None
+            if self.use_contrastive:
+                contrastive_outputs = [
+                    self.contrastive_head(tok_f,  tok_v),
+                    self.contrastive_head(tok_v,  tok_ts),
+                    self.contrastive_head(tok_f,  tok_ts),
+                ]
+            return {
+                "recon_pred":           None,
+                "recon_target":         None,
+                "contrastive_outputs":  contrastive_outputs,
+                "shared_tokens":        None,
+                "private_tokens":       None,
+                "mask_idx":             None,
+            }
+
+        # ----------------------------------------------------------------
         # Step 4: Random masking — choose which representation to mask
         # ----------------------------------------------------------------
         mask_idx = self._pick_mask_idx()
@@ -289,9 +314,12 @@ class SSMERv2(nn.Module):
         # ----------------------------------------------------------------
         encoded = self.encoder(visible_tokens)   # (B, 2*N, D)
 
-        # Split back into per-representation halves for downstream heads
-        enc_A = encoded[:, :self.n_tokens, :]    # (B, N, D)
-        enc_B = encoded[:, self.n_tokens:, :]    # (B, N, D)
+        # Split back into per-representation halves.
+        # Use tok_A.size(1) (actual token count) not self.n_tokens so that
+        # this stays correct if spatial size ever deviates from the default.
+        N_vis = tok_A.size(1)
+        enc_A = encoded[:, :N_vis, :]    # (B, N, D)
+        enc_B = encoded[:, N_vis:, :]    # (B, N, D)
 
         # ----------------------------------------------------------------
         # Step 7: Optional shared/private decomposition
@@ -312,18 +340,20 @@ class SSMERv2(nn.Module):
         recon_target = None
 
         if self.use_recon:
-            # Retrieve the masked type embedding for decoder query
+            # Derive actual spatial dims from the target — handles any sensor
+            # size and non-square inputs without hardcoding H_prime=56.
+            _, _, Hp, Wp = masked_target.shape
+            N_actual = Hp * Wp
+
             masked_type_emb = self.type_embed.embed(
                 torch.tensor(masked_type_id, device=frame.device)
             )                                           # (D,)
 
-            query = self.decoder.build_query(B, self.n_tokens, masked_type_emb)
-            decoded = self.decoder(query, encoded)      # (B, N, hrnet_out)
+            query = self.decoder.build_query(B, N_actual, masked_type_emb)
+            decoded = self.decoder(query, encoded)      # (B, N_actual, hrnet_out)
 
-            # Reshape to spatial feature map: (B, hrnet_out, H', W')
-            H_prime = int(math.isqrt(self.n_tokens))
             recon_pred = decoded.transpose(1, 2).reshape(
-                B, self.hrnet_out, H_prime, H_prime
+                B, self.hrnet_out, Hp, Wp
             )
             recon_target = masked_target                # already detached
 
@@ -362,10 +392,26 @@ class SSMERv2(nn.Module):
 
     def backbone_state_dict(self) -> dict:
         """
-        Returns only the shared HRNet body state dict.
-        This is what gets saved and loaded into Stage 2's event backbone.
+        Returns only the trained HRNet *body* weights (layer1, stage2-4,
+        transition layers).
+
+        Deliberately excludes:
+          - conv1 / bn1 / conv2 / bn2  — the original 3-ch RGB stem inside
+            shared_body, which is NEVER called in v2 (MultiStemHRNet uses its
+            own stem_frame/voxel/ts instead).  These weights are random init
+            and would silently corrupt Stage 2's event stem.
+          - head.*  — the classification head, also never called in v2.
+
+        This filter is the symmetric inverse of _load_pretrained_body in
+        hrnet_encoder.py, which uses the same prefix list when loading.
 
         Usage:
-            torch.save(model.backbone_state_dict(), "hrnet_pretrained.pth")
+            torch.save(model.backbone_state_dict(), "backbone_0200.pth")
+            # Stage 2: stage2_hrnet.load_state_dict(ckpt, strict=False)
         """
-        return self.hrnet.shared_body.state_dict()
+        skip_prefixes = ("conv1.", "bn1.", "conv2.", "bn2.", "head.")
+        return {
+            k: v
+            for k, v in self.hrnet.shared_body.state_dict().items()
+            if not any(k.startswith(p) for p in skip_prefixes)
+        }

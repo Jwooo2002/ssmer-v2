@@ -105,7 +105,9 @@ class CrossReconstructionDecoder(nn.Module):
             stop_gradient on the target, not on the query).
         """
         # mask_token: (1,1,D) → (B, N, D)
-        query = self.mask_token.expand(batch_size, n_tokens, -1).clone()
+        # .contiguous() materialises the expanded view; cheaper than .clone()
+        # which would do a full alloc+copy that is unnecessary here.
+        query = self.mask_token.expand(batch_size, n_tokens, -1).contiguous()
         # Add type identity so the decoder knows which modality to reconstruct
         query = query + type_emb.view(1, 1, -1)
         # Add spatial position — use only the first n_tokens positions to
