@@ -57,6 +57,8 @@ data:
   input_size: 224
   sensor_h: 512
   sensor_w: 512
+  cache_dir: "ssmer_v2/cache"        # converted .npy files saved here on first run
+  use_cache: true                    # set false to force re-conversion
 
 checkpoint:
   save_dir: "/media/jiwoong/HDD/data/ssmer_v2"

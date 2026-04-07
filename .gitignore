@@ -12,6 +12,7 @@ env/
 venv/
 *.log
 ssmer_v2/checkpoints/
+ssmer_v2/cache/
 checkpoints/
 *.pth
 *.pth.tar
